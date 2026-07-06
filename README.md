@@ -490,7 +490,8 @@ entrusted to a qualified electrician.
 
 | File | Purpose |
 |------|---------|
-| `pump_controller.yaml` | main ESPHome configuration (with placeholders instead of secrets) |
+| `pump_controller.yaml` | main ESPHome configuration, English (comments + web UI text), with placeholders instead of secrets |
+| `pump_controller_uk.yaml` | the same configuration, in Ukrainian |
 | `3d-print/enclosure-top.stl` | top part of the enclosure (3D printing) |
 | `3d-print/enclosure-bottom.stl` | bottom part of the enclosure (3D printing) |
 | `3d-print/enclosure-latch.stl` | enclosure latch/fastener (3D printing) |

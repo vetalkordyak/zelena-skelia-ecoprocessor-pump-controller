@@ -2,9 +2,9 @@ esphome:
   name: pump-controller
   friendly_name: "Drainage Pump"
   on_boot:
-    priority: -100   # after all components have initialized
+    priority: -100   # після ініціалізації всіх компонентів
     then:
-      - delay: 1s    # let the ADC stabilize
+      - delay: 1s    # дати ADC стабілізуватись
       - component.update: adc_raw
       - lambda: |-
           float v = id(adc_raw).state;
@@ -41,7 +41,7 @@ wifi:
 captive_portal:
 
 # ================================================================
-# WEB SERVER: version 3 with parameter grouping
+# WEB SERVER: версія 3 з групуванням параметрів
 # ================================================================
 web_server:
   port: 80
@@ -89,7 +89,7 @@ output:
     method: leading_pulse
 
 # ================================================================
-# GLOBALS: Runtime state variables (not persisted to flash)
+# GLOBALS: Змінні стану (не зберігаються у flash)
 # ================================================================
 globals:
   - id: g_state       # 0=stopped  1=running  2=resting  3=fault
@@ -112,38 +112,38 @@ globals:
     restore_value: false
     initial_value: 'true'
 
-  - id: g_level       # current dimmer level [0.0…1.0]
+  - id: g_level       # поточний рівень димера [0.0…1.0]
     type: float
     restore_value: false
     initial_value: '0.0'
 
-  - id: g_adc_idle    # baseline ADC voltage at idle [V]
+  - id: g_adc_idle    # базова напруга АЦП у стані спокою [В]
     type: float
     restore_value: false
     initial_value: '2.5'
 
-  - id: g_fault_ms    # millis() when the fault started (0 = none)
+  - id: g_fault_ms    # millis() початку аварії (0 = немає)
     type: uint32_t
     restore_value: false
     initial_value: '0'
 
-  - id: g_retry_count # restart attempt counter
+  - id: g_retry_count # лічильник спроб перезапуску
     type: int
     restore_value: false
     initial_value: '0'
 
-  - id: g_led_tick    # tick counter for LED patterns (0…19, 2s cycle)
+  - id: g_led_tick    # лічильник тіків для LED-патернів (0…19, цикл 2 с)
     type: uint8_t
     restore_value: false
     initial_value: '0'
 
-  - id: g_fault_enabled  # "Fault Detection" state — persisted to flash
+  - id: g_fault_enabled  # стан "Fault Detection" — зберігається у flash
     type: bool
     restore_value: true
     initial_value: 'true'
 
 # ================================================================
-# SELECT: Operating mode selection
+# SELECT: Вибір режиму роботи
 # ================================================================
 select:
   - platform: template
@@ -172,7 +172,7 @@ select:
             }
 
 # ================================================================
-# NUMBER: Shared power parameters (for both modes)
+# NUMBER: Спільні параметри потужності (для обох режимів)
 # ================================================================
 number:
   - platform: template
@@ -206,7 +206,7 @@ number:
       sorting_weight: 20
 
 # ================================================================
-# NUMBER: P1 (Standard) parameters — timing only
+# NUMBER: Параметри P1 (Standard) — лише часові
 # ================================================================
 
   - platform: template
@@ -270,7 +270,7 @@ number:
       sorting_weight: 40
 
 # ================================================================
-# NUMBER: P2 (Economy) parameters — timing only
+# NUMBER: Параметри P2 (Economy) — лише часові
 # ================================================================
 
   - platform: template
@@ -334,7 +334,7 @@ number:
       sorting_weight: 40
 
 # ================================================================
-# NUMBER: Fault/restart parameters
+# NUMBER: Параметри аварійного перезапуску
 # ================================================================
 
   - platform: template
@@ -368,7 +368,7 @@ number:
       sorting_weight: 20
 
 # ================================================================
-# SWITCH: System on/off
+# SWITCH: Вмикання/вимикання системи
 # ================================================================
 switch:
   - platform: template
@@ -380,7 +380,7 @@ switch:
       sorting_group_id: group_control
       sorting_weight: 20
     turn_on_action:
-      # First take a fresh ADC reading as the baseline (pump is still off)
+      # Спочатку знімаємо свіже показання ADC як базову лінію (насос ще вимкнений)
       - component.update: adc_raw
       - lambda: |-
           float adc_v = id(adc_raw).state;
@@ -434,7 +434,7 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            // Update the baseline when the pump isn't drawing current (stopped or resting)
+            // Оновлювати базову лінію коли насос не споживає струм (stopped або resting)
             if (id(g_state) == 0 || id(g_state) == 2) {
               id(g_adc_idle) = x;
             }
@@ -449,9 +449,9 @@ sensor:
       sorting_group_id: group_status
       sorting_weight: 30
     lambda: |-
-      // The dimmer phase-cuts the AC — current flows in short pulses, not a smooth sine wave.
-      // A single ADC sample lands on a random point of that pulse each time and "jumps around",
-      // so here we compute a true RMS over ~2 mains cycles (200 samples × ~200us ≈ 40ms).
+      // Димер ріже фазу — струм іде короткими пульсами, а не гладкою синусоїдою.
+      // Одиночний ADC-семпл щоразу потрапляє у випадкову точку пульсу і "стрибає",
+      // тому тут рахуємо справжнє RMS по ~2 періодах мережі (200 семплів × ~200мкс ≈ 40мс).
       float idle_v = id(g_adc_idle);
       if (isnan(idle_v)) return 0.0f;
       const int samples = 200;
@@ -501,7 +501,7 @@ binary_sensor:
       sorting_group_id: group_status
       sorting_weight: 50
     lambda: |-
-      // Hysteresis: different on/off thresholds so it doesn't chatter near the boundary.
+      // Гістерезис: різні пороги на увімкнення/вимкнення, щоб не смикалось біля межі.
       static bool running = false;
       if (id(g_state) != 1 || id(g_level) < 0.05f) {
         running = false;
@@ -523,7 +523,7 @@ binary_sensor:
       return id(g_state) == 3;
 
 # ================================================================
-# TEXT SENSOR: state + parameter descriptions
+# TEXT SENSOR: стан + описи параметрів
 # ================================================================
 text_sensor:
   - platform: template
@@ -569,7 +569,7 @@ text_sensor:
       snprintf(buf, sizeof(buf), "%d:%02d", mm, ss);
       return std::string(buf);
 
-  # --- Power Settings descriptions ---
+  # --- Описи Power Settings ---
   - platform: template
     name: "ℹ Max Power"
     entity_category: diagnostic
@@ -578,9 +578,9 @@ text_sensor:
       sorting_group_id: group_power
       sorting_weight: 15
     lambda: |-
-      return std::string("Upper power limit during pulsing (%). "
-                         "The pump smoothly ramps up to this level. "
-                         "Same value for both P1 and P2 modes.");
+      return std::string("Верхня межа потужності під час пульсації (%). "
+                         "Насос плавно розганяється до цього рівня. "
+                         "Однакове значення для обох режимів P1 та P2.");
 
   - platform: template
     name: "ℹ Min Power"
@@ -590,12 +590,12 @@ text_sensor:
       sorting_group_id: group_power
       sorting_weight: 25
     lambda: |-
-      return std::string("Lower power limit during pulsing (%). "
-                         "The pump smoothly ramps down to this level. "
-                         "Cannot be higher than Max Power. "
-                         "Same value for both P1 and P2 modes.");
+      return std::string("Нижня межа потужності під час пульсації (%). "
+                         "Насос плавно сповільнюється до цього рівня. "
+                         "Не може бути більшим за Max Power. "
+                         "Однакове значення для обох режимів P1 та P2.");
 
-  # --- P1 descriptions ---
+  # --- Описи P1 ---
   - platform: template
     name: "P1: Work Time = "
     id: p1_h_work_hint
@@ -607,7 +607,7 @@ text_sensor:
     lambda: |-
       int sec = (int)id(p1_h_work).state;
       char buf[24];
-      snprintf(buf, sizeof(buf), "%d min %02d sec", sec / 60, sec % 60);
+      snprintf(buf, sizeof(buf), "%d хв %02d с", sec / 60, sec % 60);
       return std::string(buf);
 
   - platform: template
@@ -618,8 +618,8 @@ text_sensor:
       sorting_group_id: group_p1
       sorting_weight: 15
     lambda: |-
-      return std::string("How long the pump runs actively per cycle (in seconds). "
-                         "Once this time elapses, the dimmer turns off and the rest phase begins.");
+      return std::string("Тривалість активної роботи насоса за один цикл (у секундах). "
+                         "Після закінчення цього часу димер вимикається і починається фаза паузи.");
 
   - platform: template
     name: "P1: Rest Time = "
@@ -632,7 +632,7 @@ text_sensor:
     lambda: |-
       int sec = (int)id(p1_h_rest).state;
       char buf[24];
-      snprintf(buf, sizeof(buf), "%d min %02d sec", sec / 60, sec % 60);
+      snprintf(buf, sizeof(buf), "%d хв %02d с", sec / 60, sec % 60);
       return std::string(buf);
 
   - platform: template
@@ -643,8 +643,8 @@ text_sensor:
       sorting_group_id: group_p1
       sorting_weight: 25
     lambda: |-
-      return std::string("How long the pause between work cycles lasts (in seconds). "
-                         "During this time the pump is fully off (dimmer = 0%).");
+      return std::string("Тривалість паузи між циклами роботи (у секундах). "
+                         "Протягом цього часу насос повністю вимкнений (димер = 0%).");
 
   - platform: template
     name: "ℹ P1: Ramp Up Time"
@@ -654,8 +654,8 @@ text_sensor:
       sorting_group_id: group_p1
       sorting_weight: 35
     lambda: |-
-      return std::string("Time to smoothly ramp from Min Power to Max Power (in seconds). "
-                         "Lower value — faster ramp, higher value — smoother.");
+      return std::string("Час плавного розгону від Min Power до Max Power (у секундах). "
+                         "Менше значення — швидший розгін, більше — плавніший.");
 
   - platform: template
     name: "ℹ P1: Ramp Down Time"
@@ -665,10 +665,10 @@ text_sensor:
       sorting_group_id: group_p1
       sorting_weight: 45
     lambda: |-
-      return std::string("Time to smoothly ramp down from Max Power to Min Power (in seconds). "
-                         "One pulse cycle = Ramp Up + Ramp Down, then it repeats.");
+      return std::string("Час плавного спаду від Max Power до Min Power (у секундах). "
+                         "Один цикл пульсації = Ramp Up + Ramp Down, після чого повторюється.");
 
-  # --- P2 descriptions ---
+  # --- Описи P2 ---
   - platform: template
     name: "P2: Work Time = "
     id: p2_h_work_hint
@@ -680,7 +680,7 @@ text_sensor:
     lambda: |-
       int sec = (int)id(p2_h_work).state;
       char buf[24];
-      snprintf(buf, sizeof(buf), "%d min %02d sec", sec / 60, sec % 60);
+      snprintf(buf, sizeof(buf), "%d хв %02d с", sec / 60, sec % 60);
       return std::string(buf);
 
   - platform: template
@@ -691,8 +691,8 @@ text_sensor:
       sorting_group_id: group_p2
       sorting_weight: 15
     lambda: |-
-      return std::string("How long the pump runs actively per cycle (in seconds). "
-                         "Economy mode is designed for shorter work and a longer pause.");
+      return std::string("Тривалість активної роботи насоса за один цикл (у секундах). "
+                         "Економ-режим розрахований на коротшу роботу і довшу паузу.");
 
   - platform: template
     name: "P2: Rest Time = "
@@ -705,7 +705,7 @@ text_sensor:
     lambda: |-
       int sec = (int)id(p2_h_rest).state;
       char buf[24];
-      snprintf(buf, sizeof(buf), "%d min %02d sec", sec / 60, sec % 60);
+      snprintf(buf, sizeof(buf), "%d хв %02d с", sec / 60, sec % 60);
       return std::string(buf);
 
   - platform: template
@@ -716,8 +716,8 @@ text_sensor:
       sorting_group_id: group_p2
       sorting_weight: 25
     lambda: |-
-      return std::string("How long the pause between work cycles lasts (in seconds). "
-                         "In economy mode the pause is much longer, to reduce pump wear.");
+      return std::string("Тривалість паузи між циклами роботи (у секундах). "
+                         "В економ-режимі пауза значно довша для зниження навантаження на насос.");
 
   - platform: template
     name: "ℹ P2: Ramp Up Time"
@@ -727,7 +727,7 @@ text_sensor:
       sorting_group_id: group_p2
       sorting_weight: 35
     lambda: |-
-      return std::string("Time to smoothly ramp from Min Power to Max Power (in seconds).");
+      return std::string("Час плавного розгону від Min Power до Max Power (у секундах).");
 
   - platform: template
     name: "ℹ P2: Ramp Down Time"
@@ -737,10 +737,10 @@ text_sensor:
       sorting_group_id: group_p2
       sorting_weight: 45
     lambda: |-
-      return std::string("Time to smoothly ramp down from Max Power to Min Power (in seconds). "
-                         "One pulse cycle = Ramp Up + Ramp Down, then it repeats.");
+      return std::string("Час плавного спаду від Max Power до Min Power (у секундах). "
+                         "Один цикл пульсації = Ramp Up + Ramp Down, після чого повторюється.");
 
-  # --- Fault descriptions ---
+  # --- Описи Fault ---
   - platform: template
     name: "ℹ Fault: Detection Time"
     entity_category: diagnostic
@@ -749,8 +749,8 @@ text_sensor:
       sorting_group_id: group_fault
       sorting_weight: 15
     lambda: |-
-      return std::string("How many seconds in a row current must be absent while the dimmer is "
-                         "active for the system to declare a fault and enter standby.");
+      return std::string("Скільки секунд підряд має бути відсутній струм при активному димері, "
+                         "щоб система визнала аварію і перейшла в режим очікування.");
 
   - platform: template
     name: "Fault: Retry Delay = "
@@ -763,7 +763,7 @@ text_sensor:
     lambda: |-
       int sec = (int)id(fault_retry_s).state;
       char buf[24];
-      snprintf(buf, sizeof(buf), "%d min %02d sec", sec / 60, sec % 60);
+      snprintf(buf, sizeof(buf), "%d хв %02d с", sec / 60, sec % 60);
       return std::string(buf);
 
   - platform: template
@@ -774,14 +774,14 @@ text_sensor:
       sorting_group_id: group_fault
       sorting_weight: 25
     lambda: |-
-      return std::string("How many seconds the system waits after detecting a fault before the "
-                         "next restart attempt. If the pump fails to start again, the cycle repeats.");
+      return std::string("Скільки секунд система чекає після виявлення аварії перед наступною "
+                         "спробою запустити насос. Якщо насос знову не запускається — цикл повторюється.");
 
 # ================================================================
-# INTERVAL: Main state machine — non-blocking, 100 ms
+# INTERVAL: Головна машина станів — неблокуюча, 100 мс
 #
-# States: 0=stopped → 1=running ⇄ 2=resting
-#                         ↓ (fault)
+# Стани: 0=stopped → 1=running ⇄ 2=resting
+#                         ↓ (аварія)
 #                      3=fault → (retry delay) → 1=running
 # ================================================================
 interval:
@@ -793,13 +793,13 @@ interval:
           uint32_t now = millis();
           bool p1 = id(pump_mode).state == "P1 Standard";
 
-          // Timing parameters — depend on the mode
+          // Часові параметри — залежать від режиму
           float h_work_ms = (p1 ? id(p1_h_work).state : id(p2_h_work).state) * 1000.0f;
           float h_rest_ms = (p1 ? id(p1_h_rest).state : id(p2_h_rest).state) * 1000.0f;
           float h_up_ms   = (p1 ? id(p1_h_up).state   : id(p2_h_up).state)   * 1000.0f;
           float h_down_ms = (p1 ? id(p1_h_down).state : id(p2_h_down).state) * 1000.0f;
 
-          // Power parameters — shared between both modes
+          // Параметри потужності — спільні для обох режимів
           float pwr_max = id(u_max).state / 100.0f;
           float pwr_min = id(u_min).state / 100.0f;
 
@@ -809,11 +809,11 @@ interval:
 
           uint32_t phase_elapsed = now - id(g_phase_ms);
 
-          // ---- P3: constant 100%, no cycling ----
+          // ---- P3: постійно 100%, без циклів ----
           if (id(pump_mode).state == "P3 Constant") {
             id(g_level) = 1.0f;
             id(dimmer_output).set_level(1.0f);
-            // Fault: no current at 100% power
+            // Аварія: немає струму при 100% потужності
             if (id(g_fault_enabled) && id(pump_current).state < 0.3f) {
               if (id(g_fault_ms) == 0) {
                 id(g_fault_ms) = now;
@@ -828,7 +828,7 @@ interval:
             } else {
               id(g_fault_ms) = 0;
             }
-            // LED: solid on (running)
+            // LED: горить постійно (running)
             id(g_led_tick) = (id(g_led_tick) + 1) % 20;
             id(led_output).turn_on();
             return;
@@ -874,7 +874,7 @@ interval:
             id(g_level) = level;
             id(dimmer_output).set_level(level);
 
-            // Fault detection: no current while the dimmer is active
+            // Виявлення аварії: немає струму при активному димері
             if (id(g_fault_enabled) && level >= 0.05f && id(pump_current).state < 0.3f) {
               if (id(g_fault_ms) == 0) {
                 id(g_fault_ms) = now;
@@ -901,7 +901,7 @@ interval:
               id(g_ramp_up)  = true;
             }
 
-          // ---- FAULT: waiting before retry ----
+          // ---- FAULT: очікування перед спробою перезапуску ----
           } else if (id(g_state) == 3) {
 
             if ((float)phase_elapsed >= id(fault_retry_s).state * 1000.0f) {
@@ -912,11 +912,11 @@ interval:
             }
           }
 
-          // ---- LED INDICATION (GPIO2, 20-tick cycle × 100 ms = 2 s) ----
-          // Stopped : off
-          // Running : solid on
-          // Resting : 1 short blink every 2s  ( █░░░░░░░░░░░░░░░░░░░ )
-          // Fault   : double blink every 2s   ( ██░░██░░░░░░░░░░░░░░ )
+          // ---- LED ІНДИКАЦІЯ (GPIO2, цикл 20 тіків × 100 мс = 2 с) ----
+          // Stopped : вимкнений
+          // Running : постійно горить
+          // Resting : 1 короткий спалах раз на 2 с  ( █░░░░░░░░░░░░░░░░░░░ )
+          // Fault   : подвійний спалах раз на 2 с   ( ██░░██░░░░░░░░░░░░░░ )
           id(g_led_tick) = (id(g_led_tick) + 1) % 20;
           uint8_t t = id(g_led_tick);
           bool led_on;
