@@ -1,0 +1,931 @@
+esphome:
+  name: pump-controller
+  friendly_name: "Drainage Pump"
+  on_boot:
+    priority: -100   # after all components have initialized
+    then:
+      - delay: 1s    # let the ADC stabilize
+      - component.update: adc_raw
+      - lambda: |-
+          float v = id(adc_raw).state;
+          if (id(adc_raw).has_state() && !isnan(v)) {
+            id(g_adc_idle) = v;
+          }
+
+esp8266:
+  board: d1_mini
+
+logger:
+  level: INFO
+
+api:
+  encryption:
+    key: "YOUR_API_ENCRYPTION_KEY_BASE64"   # generate: python3 -c "import base64,os; print(base64.b64encode(os.urandom(32)).decode())"
+
+ota:
+  - platform: esphome
+    password: "YOUR_OTA_PASSWORD"
+
+wifi:
+  networks:
+    - ssid: "YOUR_WIFI_SSID"
+      password: "YOUR_WIFI_PASSWORD"
+    - ssid: "YOUR_WIFI_SSID_2"
+      password: "YOUR_WIFI_PASSWORD_2"
+  ap:
+    ssid: "PumpCtrl Fallback"
+    password: "YOUR_AP_FALLBACK_PASSWORD"
+
+  use_address: 192.168.5.123
+
+captive_portal:
+
+# ================================================================
+# WEB SERVER: version 3 with parameter grouping
+# ================================================================
+web_server:
+  port: 80
+  version: 3
+  sorting_groups:
+    - id: group_control
+      name: "Pump Control"
+      sorting_weight: 1
+    - id: group_power
+      name: "Power Settings"
+      sorting_weight: 2
+    - id: group_status
+      name: "Status & Monitoring"
+      sorting_weight: 3
+    - id: group_p1
+      name: "Mode P1 — Standard"
+      sorting_weight: 4
+    - id: group_p2
+      name: "Mode P2 — Economy"
+      sorting_weight: 5
+    - id: group_fault
+      name: "Fault & Recovery"
+      sorting_weight: 6
+
+# ================================================================
+# OUTPUT: AC Dimmer RobotDyn
+# gate_pin   = GPIO4 (D2)
+# zero_cross = GPIO5 (D1)
+# ================================================================
+output:
+  - platform: gpio
+    id: led_output
+    pin:
+      number: GPIO2
+      inverted: true  # Wemos D1 Mini: LED is active LOW
+
+  - platform: ac_dimmer
+    id: dimmer_output
+    gate_pin: GPIO4
+    zero_cross_pin:
+      number: GPIO5
+      mode:
+        input: true
+    min_power: 0.0
+    method: leading_pulse
+
+# ================================================================
+# GLOBALS: Runtime state variables (not persisted to flash)
+# ================================================================
+globals:
+  - id: g_state       # 0=stopped  1=running  2=resting  3=fault
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: g_phase_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+  - id: g_pulse_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+  - id: g_ramp_up     # true=ramp up, false=ramp down
+    type: bool
+    restore_value: false
+    initial_value: 'true'
+
+  - id: g_level       # current dimmer level [0.0…1.0]
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+
+  - id: g_adc_idle    # baseline ADC voltage at idle [V]
+    type: float
+    restore_value: false
+    initial_value: '2.5'
+
+  - id: g_fault_ms    # millis() when the fault started (0 = none)
+    type: uint32_t
+    restore_value: false
+    initial_value: '0'
+
+  - id: g_retry_count # restart attempt counter
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+  - id: g_led_tick    # tick counter for LED patterns (0…19, 2s cycle)
+    type: uint8_t
+    restore_value: false
+    initial_value: '0'
+
+  - id: g_fault_enabled  # "Fault Detection" state — persisted to flash
+    type: bool
+    restore_value: true
+    initial_value: 'true'
+
+# ================================================================
+# SELECT: Operating mode selection
+# ================================================================
+select:
+  - platform: template
+    name: "Operating Mode"
+    id: pump_mode
+    optimistic: true
+    restore_value: true
+    options:
+      - "P1 Standard"
+      - "P2 Economy"
+      - "P3 Constant"
+    initial_option: "P1 Standard"
+    web_server:
+      sorting_group_id: group_control
+      sorting_weight: 10
+    on_value:
+      then:
+        - lambda: |-
+            if (id(g_state) != 0) {
+              uint32_t now = millis();
+              id(g_state)    = 1;
+              id(g_phase_ms) = now;
+              id(g_pulse_ms) = now;
+              id(g_ramp_up)  = true;
+              id(g_fault_ms) = 0;
+            }
+
+# ================================================================
+# NUMBER: Shared power parameters (for both modes)
+# ================================================================
+number:
+  - platform: template
+    name: "Max Power"
+    id: u_max
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 75
+    restore_value: true
+    optimistic: true
+    mode: slider
+    web_server:
+      sorting_group_id: group_power
+      sorting_weight: 10
+
+  - platform: template
+    name: "Min Power"
+    id: u_min
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 55
+    restore_value: true
+    optimistic: true
+    mode: slider
+    web_server:
+      sorting_group_id: group_power
+      sorting_weight: 20
+
+# ================================================================
+# NUMBER: P1 (Standard) parameters — timing only
+# ================================================================
+
+  - platform: template
+    name: "P1: Work Time"
+    id: p1_h_work
+    unit_of_measurement: "s"
+    min_value: 10
+    max_value: 3600
+    step: 1
+    initial_value: 120
+    restore_value: true
+    optimistic: true
+    mode: box
+    web_server:
+      sorting_group_id: group_p1
+      sorting_weight: 10
+
+  - platform: template
+    name: "P1: Rest Time"
+    id: p1_h_rest
+    unit_of_measurement: "s"
+    min_value: 10
+    max_value: 7200
+    step: 1
+    initial_value: 480
+    restore_value: true
+    optimistic: true
+    mode: box
+    web_server:
+      sorting_group_id: group_p1
+      sorting_weight: 20
+
+  - platform: template
+    name: "P1: Ramp Up Time"
+    id: p1_h_up
+    unit_of_measurement: "s"
+    min_value: 0.1
+    max_value: 60
+    step: 0.1
+    initial_value: 0.1
+    restore_value: true
+    optimistic: true
+    mode: box
+    web_server:
+      sorting_group_id: group_p1
+      sorting_weight: 30
+
+  - platform: template
+    name: "P1: Ramp Down Time"
+    id: p1_h_down
+    unit_of_measurement: "s"
+    min_value: 0.1
+    max_value: 120
+    step: 0.1
+    initial_value: 14.0
+    restore_value: true
+    optimistic: true
+    mode: box
+    web_server:
+      sorting_group_id: group_p1
+      sorting_weight: 40
+
+# ================================================================
+# NUMBER: P2 (Economy) parameters — timing only
+# ================================================================
+
+  - platform: template
+    name: "P2: Work Time"
+    id: p2_h_work
+    unit_of_measurement: "s"
+    min_value: 10
+    max_value: 3600
+    step: 1
+    initial_value: 60
+    restore_value: true
+    optimistic: true
+    mode: box
+    web_server:
+      sorting_group_id: group_p2
+      sorting_weight: 10
+
+  - platform: template
+    name: "P2: Rest Time"
+    id: p2_h_rest
+    unit_of_measurement: "s"
+    min_value: 10
+    max_value: 7200
+    step: 1
+    initial_value: 1740
+    restore_value: true
+    optimistic: true
+    mode: box
+    web_server:
+      sorting_group_id: group_p2
+      sorting_weight: 20
+
+  - platform: template
+    name: "P2: Ramp Up Time"
+    id: p2_h_up
+    unit_of_measurement: "s"
+    min_value: 0.1
+    max_value: 60
+    step: 0.1
+    initial_value: 0.1
+    restore_value: true
+    optimistic: true
+    mode: box
+    web_server:
+      sorting_group_id: group_p2
+      sorting_weight: 30
+
+  - platform: template
+    name: "P2: Ramp Down Time"
+    id: p2_h_down
+    unit_of_measurement: "s"
+    min_value: 0.1
+    max_value: 120
+    step: 0.1
+    initial_value: 14.0
+    restore_value: true
+    optimistic: true
+    mode: box
+    web_server:
+      sorting_group_id: group_p2
+      sorting_weight: 40
+
+# ================================================================
+# NUMBER: Fault/restart parameters
+# ================================================================
+
+  - platform: template
+    name: "Fault: Detection Time"
+    id: fault_detect_s
+    unit_of_measurement: "s"
+    min_value: 1
+    max_value: 60
+    step: 1
+    initial_value: 5
+    restore_value: true
+    optimistic: true
+    mode: box
+    web_server:
+      sorting_group_id: group_fault
+      sorting_weight: 10
+
+  - platform: template
+    name: "Fault: Retry Delay"
+    id: fault_retry_s
+    unit_of_measurement: "s"
+    min_value: 5
+    max_value: 3600
+    step: 5
+    initial_value: 30
+    restore_value: true
+    optimistic: true
+    mode: box
+    web_server:
+      sorting_group_id: group_fault
+      sorting_weight: 20
+
+# ================================================================
+# SWITCH: System on/off
+# ================================================================
+switch:
+  - platform: template
+    name: "Pump: Enabled"
+    id: pump_enable
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    web_server:
+      sorting_group_id: group_control
+      sorting_weight: 20
+    turn_on_action:
+      # First take a fresh ADC reading as the baseline (pump is still off)
+      - component.update: adc_raw
+      - lambda: |-
+          float adc_v = id(adc_raw).state;
+          if (id(adc_raw).has_state() && !isnan(adc_v)) {
+            id(g_adc_idle) = adc_v;
+          }
+          uint32_t now  = millis();
+          id(g_state)    = 1;
+          id(g_phase_ms) = now;
+          id(g_pulse_ms) = now;
+          id(g_ramp_up)  = true;
+          id(g_fault_ms) = 0;
+    turn_off_action:
+      - lambda: |-
+          id(g_state) = 0;
+          id(g_level) = 0.0f;
+          id(g_fault_ms) = 0;
+          id(dimmer_output).set_level(0.0f);
+
+  - platform: template
+    name: "Fault Detection: Enabled"
+    id: fault_enabled
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    web_server:
+      sorting_group_id: group_fault
+      sorting_weight: 5
+    lambda: |-
+      return id(g_fault_enabled);
+    turn_on_action:
+      - lambda: 'id(g_fault_enabled) = true;'
+    turn_off_action:
+      - lambda: 'id(g_fault_enabled) = false;'
+
+# ================================================================
+# SENSOR
+# ================================================================
+sensor:
+  - platform: adc
+    pin: A0
+    id: adc_raw
+    name: "ADC A0"
+    update_interval: 1s
+    filters:
+      - multiply: 3.2
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 40
+    on_value:
+      then:
+        - lambda: |-
+            // Update the baseline when the pump isn't drawing current (stopped or resting)
+            if (id(g_state) == 0 || id(g_state) == 2) {
+              id(g_adc_idle) = x;
+            }
+
+  - platform: template
+    name: "Pump Current"
+    id: pump_current
+    unit_of_measurement: "A"
+    accuracy_decimals: 2
+    update_interval: 1s
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 30
+    lambda: |-
+      // The dimmer phase-cuts the AC — current flows in short pulses, not a smooth sine wave.
+      // A single ADC sample lands on a random point of that pulse each time and "jumps around",
+      // so here we compute a true RMS over ~2 mains cycles (200 samples × ~200us ≈ 40ms).
+      float idle_v = id(g_adc_idle);
+      if (isnan(idle_v)) return 0.0f;
+      const int samples = 200;
+      double sum_sq = 0.0;
+      for (int i = 0; i < samples; i++) {
+        int raw = analogRead(A0);
+        float v = raw * 3.2f / 1023.0f;
+        float diff = v - idle_v;
+        sum_sq += (double)diff * diff;
+        delayMicroseconds(100);
+      }
+      float rms_v = sqrtf((float)(sum_sq / samples));
+      return rms_v / 0.185f;
+
+  - platform: template
+    name: "Power Level"
+    id: dimmer_level_pct
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    update_interval: 500ms
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 20
+    lambda: |-
+      return id(g_level) * 100.0f;
+
+  - platform: template
+    name: "Restart Attempts"
+    id: retry_count_sensor
+    accuracy_decimals: 0
+    update_interval: 5s
+    web_server:
+      sorting_group_id: group_fault
+      sorting_weight: 30
+    lambda: |-
+      return (float)id(g_retry_count);
+
+# ================================================================
+# BINARY SENSOR
+# ================================================================
+binary_sensor:
+  - platform: template
+    name: "Pump Status"
+    id: pump_status
+    device_class: running
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 50
+    lambda: |-
+      // Hysteresis: different on/off thresholds so it doesn't chatter near the boundary.
+      static bool running = false;
+      if (id(g_state) != 1 || id(g_level) < 0.05f) {
+        running = false;
+        return running;
+      }
+      float i = id(pump_current).state;
+      if (!running && i > 0.35f)      running = true;
+      else if (running && i < 0.20f)  running = false;
+      return running;
+
+  - platform: template
+    name: "Pump Fault"
+    id: pump_fault
+    device_class: problem
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 60
+    lambda: |-
+      return id(g_state) == 3;
+
+# ================================================================
+# TEXT SENSOR: state + parameter descriptions
+# ================================================================
+text_sensor:
+  - platform: template
+    name: "Operating Phase"
+    id: pump_phase_text
+    update_interval: 1s
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 5
+    lambda: |-
+      switch (id(g_state)) {
+        case 0: return std::string("Stopped");
+        case 1: return std::string(id(g_ramp_up) ? "Running — Ramp Up" : "Running — Ramp Down");
+        case 2: return std::string("Resting");
+        case 3: return std::string("FAULT — Awaiting Restart");
+        default: return std::string("Unknown");
+      }
+
+  - platform: template
+    name: "Phase Remaining"
+    id: phase_remaining_s
+    update_interval: 1s
+    web_server:
+      sorting_group_id: group_status
+      sorting_weight: 10
+    lambda: |-
+      if (id(g_state) == 0) return std::string("0:00");
+      bool p1 = id(pump_mode).state == "P1 Standard";
+      float total_ms;
+      if (id(g_state) == 1)
+        total_ms = (p1 ? id(p1_h_work).state : id(p2_h_work).state) * 1000.0f;
+      else if (id(g_state) == 2)
+        total_ms = (p1 ? id(p1_h_rest).state : id(p2_h_rest).state) * 1000.0f;
+      else
+        total_ms = id(fault_retry_s).state * 1000.0f;
+      float elapsed_ms = (float)(millis() - id(g_phase_ms));
+      float rem = (total_ms - elapsed_ms) / 1000.0f;
+      if (rem < 0.0f) rem = 0.0f;
+      int total_sec = (int)(rem + 0.5f);
+      int mm = total_sec / 60;
+      int ss = total_sec % 60;
+      char buf[16];
+      snprintf(buf, sizeof(buf), "%d:%02d", mm, ss);
+      return std::string(buf);
+
+  # --- Power Settings descriptions ---
+  - platform: template
+    name: "ℹ Max Power"
+    entity_category: diagnostic
+    update_interval: 3600s
+    web_server:
+      sorting_group_id: group_power
+      sorting_weight: 15
+    lambda: |-
+      return std::string("Верхня межа потужності під час пульсації (%). "
+                         "Насос плавно розганяється до цього рівня. "
+                         "Однакове значення для обох режимів P1 та P2.");
+
+  - platform: template
+    name: "ℹ Min Power"
+    entity_category: diagnostic
+    update_interval: 3600s
+    web_server:
+      sorting_group_id: group_power
+      sorting_weight: 25
+    lambda: |-
+      return std::string("Нижня межа потужності під час пульсації (%). "
+                         "Насос плавно сповільнюється до цього рівня. "
+                         "Не може бути більшим за Max Power. "
+                         "Однакове значення для обох режимів P1 та P2.");
+
+  # --- P1 descriptions ---
+  - platform: template
+    name: "P1: Work Time = "
+    id: p1_h_work_hint
+    entity_category: diagnostic
+    update_interval: 1s
+    web_server:
+      sorting_group_id: group_p1
+      sorting_weight: 12
+    lambda: |-
+      int sec = (int)id(p1_h_work).state;
+      char buf[24];
+      snprintf(buf, sizeof(buf), "%d хв %02d с", sec / 60, sec % 60);
+      return std::string(buf);
+
+  - platform: template
+    name: "ℹ P1: Work Time"
+    entity_category: diagnostic
+    update_interval: 3600s
+    web_server:
+      sorting_group_id: group_p1
+      sorting_weight: 15
+    lambda: |-
+      return std::string("Тривалість активної роботи насоса за один цикл (у секундах). "
+                         "Після закінчення цього часу димер вимикається і починається фаза паузи.");
+
+  - platform: template
+    name: "P1: Rest Time = "
+    id: p1_h_rest_hint
+    entity_category: diagnostic
+    update_interval: 1s
+    web_server:
+      sorting_group_id: group_p1
+      sorting_weight: 22
+    lambda: |-
+      int sec = (int)id(p1_h_rest).state;
+      char buf[24];
+      snprintf(buf, sizeof(buf), "%d хв %02d с", sec / 60, sec % 60);
+      return std::string(buf);
+
+  - platform: template
+    name: "ℹ P1: Rest Time"
+    entity_category: diagnostic
+    update_interval: 3600s
+    web_server:
+      sorting_group_id: group_p1
+      sorting_weight: 25
+    lambda: |-
+      return std::string("Тривалість паузи між циклами роботи (у секундах). "
+                         "Протягом цього часу насос повністю вимкнений (димер = 0%).");
+
+  - platform: template
+    name: "ℹ P1: Ramp Up Time"
+    entity_category: diagnostic
+    update_interval: 3600s
+    web_server:
+      sorting_group_id: group_p1
+      sorting_weight: 35
+    lambda: |-
+      return std::string("Час плавного розгону від Min Power до Max Power (у секундах). "
+                         "Менше значення — швидший розгін, більше — плавніший.");
+
+  - platform: template
+    name: "ℹ P1: Ramp Down Time"
+    entity_category: diagnostic
+    update_interval: 3600s
+    web_server:
+      sorting_group_id: group_p1
+      sorting_weight: 45
+    lambda: |-
+      return std::string("Час плавного спаду від Max Power до Min Power (у секундах). "
+                         "Один цикл пульсації = Ramp Up + Ramp Down, після чого повторюється.");
+
+  # --- P2 descriptions ---
+  - platform: template
+    name: "P2: Work Time = "
+    id: p2_h_work_hint
+    entity_category: diagnostic
+    update_interval: 1s
+    web_server:
+      sorting_group_id: group_p2
+      sorting_weight: 12
+    lambda: |-
+      int sec = (int)id(p2_h_work).state;
+      char buf[24];
+      snprintf(buf, sizeof(buf), "%d хв %02d с", sec / 60, sec % 60);
+      return std::string(buf);
+
+  - platform: template
+    name: "ℹ P2: Work Time"
+    entity_category: diagnostic
+    update_interval: 3600s
+    web_server:
+      sorting_group_id: group_p2
+      sorting_weight: 15
+    lambda: |-
+      return std::string("Тривалість активної роботи насоса за один цикл (у секундах). "
+                         "Економ-режим розрахований на коротшу роботу і довшу паузу.");
+
+  - platform: template
+    name: "P2: Rest Time = "
+    id: p2_h_rest_hint
+    entity_category: diagnostic
+    update_interval: 1s
+    web_server:
+      sorting_group_id: group_p2
+      sorting_weight: 22
+    lambda: |-
+      int sec = (int)id(p2_h_rest).state;
+      char buf[24];
+      snprintf(buf, sizeof(buf), "%d хв %02d с", sec / 60, sec % 60);
+      return std::string(buf);
+
+  - platform: template
+    name: "ℹ P2: Rest Time"
+    entity_category: diagnostic
+    update_interval: 3600s
+    web_server:
+      sorting_group_id: group_p2
+      sorting_weight: 25
+    lambda: |-
+      return std::string("Тривалість паузи між циклами роботи (у секундах). "
+                         "В економ-режимі пауза значно довша для зниження навантаження на насос.");
+
+  - platform: template
+    name: "ℹ P2: Ramp Up Time"
+    entity_category: diagnostic
+    update_interval: 3600s
+    web_server:
+      sorting_group_id: group_p2
+      sorting_weight: 35
+    lambda: |-
+      return std::string("Час плавного розгону від Min Power до Max Power (у секундах).");
+
+  - platform: template
+    name: "ℹ P2: Ramp Down Time"
+    entity_category: diagnostic
+    update_interval: 3600s
+    web_server:
+      sorting_group_id: group_p2
+      sorting_weight: 45
+    lambda: |-
+      return std::string("Час плавного спаду від Max Power до Min Power (у секундах). "
+                         "Один цикл пульсації = Ramp Up + Ramp Down, після чого повторюється.");
+
+  # --- Fault descriptions ---
+  - platform: template
+    name: "ℹ Fault: Detection Time"
+    entity_category: diagnostic
+    update_interval: 3600s
+    web_server:
+      sorting_group_id: group_fault
+      sorting_weight: 15
+    lambda: |-
+      return std::string("Скільки секунд підряд має бути відсутній струм при активному димері, "
+                         "щоб система визнала аварію і перейшла в режим очікування.");
+
+  - platform: template
+    name: "Fault: Retry Delay = "
+    id: fault_retry_s_hint
+    entity_category: diagnostic
+    update_interval: 1s
+    web_server:
+      sorting_group_id: group_fault
+      sorting_weight: 22
+    lambda: |-
+      int sec = (int)id(fault_retry_s).state;
+      char buf[24];
+      snprintf(buf, sizeof(buf), "%d хв %02d с", sec / 60, sec % 60);
+      return std::string(buf);
+
+  - platform: template
+    name: "ℹ Fault: Retry Delay"
+    entity_category: diagnostic
+    update_interval: 3600s
+    web_server:
+      sorting_group_id: group_fault
+      sorting_weight: 25
+    lambda: |-
+      return std::string("Скільки секунд система чекає після виявлення аварії перед наступною "
+                         "спробою запустити насос. Якщо насос знову не запускається — цикл повторюється.");
+
+# ================================================================
+# INTERVAL: Main state machine — non-blocking, 100 ms
+#
+# States: 0=stopped → 1=running ⇄ 2=resting
+#                         ↓ (fault)
+#                      3=fault → (retry delay) → 1=running
+# ================================================================
+interval:
+  - interval: 100ms
+    then:
+      - lambda: |-
+          if (id(g_state) == 0) return;
+
+          uint32_t now = millis();
+          bool p1 = id(pump_mode).state == "P1 Standard";
+
+          // Timing parameters — depend on the mode
+          float h_work_ms = (p1 ? id(p1_h_work).state : id(p2_h_work).state) * 1000.0f;
+          float h_rest_ms = (p1 ? id(p1_h_rest).state : id(p2_h_rest).state) * 1000.0f;
+          float h_up_ms   = (p1 ? id(p1_h_up).state   : id(p2_h_up).state)   * 1000.0f;
+          float h_down_ms = (p1 ? id(p1_h_down).state : id(p2_h_down).state) * 1000.0f;
+
+          // Power parameters — shared between both modes
+          float pwr_max = id(u_max).state / 100.0f;
+          float pwr_min = id(u_min).state / 100.0f;
+
+          if (pwr_min > pwr_max) pwr_min   = pwr_max;
+          if (h_up_ms   < 1.0f)  h_up_ms   = 1.0f;
+          if (h_down_ms < 1.0f)  h_down_ms = 1.0f;
+
+          uint32_t phase_elapsed = now - id(g_phase_ms);
+
+          // ---- P3: constant 100%, no cycling ----
+          if (id(pump_mode).state == "P3 Constant") {
+            id(g_level) = 1.0f;
+            id(dimmer_output).set_level(1.0f);
+            // Fault: no current at 100% power
+            if (id(g_fault_enabled) && id(pump_current).state < 0.3f) {
+              if (id(g_fault_ms) == 0) {
+                id(g_fault_ms) = now;
+              } else if ((float)(now - id(g_fault_ms)) >= id(fault_detect_s).state * 1000.0f) {
+                id(g_state)       = 3;
+                id(g_phase_ms)    = now;
+                id(g_fault_ms)    = 0;
+                id(g_level)       = 0.0f;
+                id(g_retry_count) = id(g_retry_count) + 1;
+                id(dimmer_output).set_level(0.0f);
+              }
+            } else {
+              id(g_fault_ms) = 0;
+            }
+            // LED: solid on (running)
+            id(g_led_tick) = (id(g_led_tick) + 1) % 20;
+            id(led_output).turn_on();
+            return;
+          }
+
+          // ---- RUNNING ----
+          if (id(g_state) == 1) {
+
+            if ((float)phase_elapsed >= h_work_ms) {
+              id(g_state)    = 2;
+              id(g_phase_ms) = now;
+              id(g_level)    = 0.0f;
+              id(g_fault_ms) = 0;
+              id(dimmer_output).set_level(0.0f);
+              return;
+            }
+
+            uint32_t pulse_elapsed = now - id(g_pulse_ms);
+            float level;
+
+            if (id(g_ramp_up)) {
+              if ((float)pulse_elapsed >= h_up_ms) {
+                id(g_ramp_up)  = false;
+                id(g_pulse_ms) = now;
+                level = pwr_max;
+              } else {
+                float t = (float)pulse_elapsed / h_up_ms;
+                level = pwr_min + (pwr_max - pwr_min) * t;
+              }
+            } else {
+              if ((float)pulse_elapsed >= h_down_ms) {
+                id(g_ramp_up)  = true;
+                id(g_pulse_ms) = now;
+                level = pwr_min;
+              } else {
+                float t = (float)pulse_elapsed / h_down_ms;
+                level = pwr_max - (pwr_max - pwr_min) * t;
+              }
+            }
+
+            if (level < 0.0f) level = 0.0f;
+            if (level > 1.0f) level = 1.0f;
+            id(g_level) = level;
+            id(dimmer_output).set_level(level);
+
+            // Fault detection: no current while the dimmer is active
+            if (id(g_fault_enabled) && level >= 0.05f && id(pump_current).state < 0.3f) {
+              if (id(g_fault_ms) == 0) {
+                id(g_fault_ms) = now;
+              } else if ((float)(now - id(g_fault_ms)) >= id(fault_detect_s).state * 1000.0f) {
+                id(g_state)       = 3;
+                id(g_phase_ms)    = now;
+                id(g_fault_ms)    = 0;
+                id(g_level)       = 0.0f;
+                id(g_retry_count) = id(g_retry_count) + 1;
+                id(dimmer_output).set_level(0.0f);
+                return;
+              }
+            } else {
+              id(g_fault_ms) = 0;
+            }
+
+          // ---- RESTING ----
+          } else if (id(g_state) == 2) {
+
+            if ((float)phase_elapsed >= h_rest_ms) {
+              id(g_state)    = 1;
+              id(g_phase_ms) = now;
+              id(g_pulse_ms) = now;
+              id(g_ramp_up)  = true;
+            }
+
+          // ---- FAULT: waiting before retry ----
+          } else if (id(g_state) == 3) {
+
+            if ((float)phase_elapsed >= id(fault_retry_s).state * 1000.0f) {
+              id(g_state)    = 1;
+              id(g_phase_ms) = now;
+              id(g_pulse_ms) = now;
+              id(g_ramp_up)  = true;
+            }
+          }
+
+          // ---- LED INDICATION (GPIO2, 20-tick cycle × 100 ms = 2 s) ----
+          // Stopped : off
+          // Running : solid on
+          // Resting : 1 short blink every 2s  ( █░░░░░░░░░░░░░░░░░░░ )
+          // Fault   : double blink every 2s   ( ██░░██░░░░░░░░░░░░░░ )
+          id(g_led_tick) = (id(g_led_tick) + 1) % 20;
+          uint8_t t = id(g_led_tick);
+          bool led_on;
+          switch (id(g_state)) {
+            case 0:  led_on = false;           break;  // Stopped
+            case 1:  led_on = true;            break;  // Running — solid
+            case 2:  led_on = (t == 0);        break;  // Resting — 1 blink/2s
+            case 3:  led_on = (t < 2 || (t >= 4 && t < 6)); break; // Fault — double blink
+            default: led_on = false;
+          }
+          if (led_on) id(led_output).turn_on();
+          else        id(led_output).turn_off();
